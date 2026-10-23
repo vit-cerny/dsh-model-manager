@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# local env and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# runtime state and logs
+*.log
+logs/
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

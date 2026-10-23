@@ -1,0 +1,8 @@
+# dsh-model-manager bundle patch: insert the plugin row into the profile tree.
+# Loaded as a profile bundle layer (package.json -> dsh.bundle.patch).
+- insert:
+    - id: model-manager
+      name: 'dsh-model-manager'
+      config:
+        enabled: true
+        allowWrite: true
