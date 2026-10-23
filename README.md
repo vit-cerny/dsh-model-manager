@@ -1,4 +1,4 @@
-# dsh-model-manager
+# dsh-import-models
 
 Import the models, providers, API keys and OAuth logins that other agent harnesses
 keep on this machine into **DeepSeek Harness**, then enable, disable and remove them
@@ -36,7 +36,7 @@ key value never travels through the page.
 ## Install
 
 ```text
-plugin_manager install_bundle  target: <path-to>/dsh-model-manager
+plugin_manager install_bundle  target: <path-to>/dsh-import-models
 ```
 
 The bundle inserts one row:
@@ -44,7 +44,7 @@ The bundle inserts one row:
 ```yaml
 - insert:
     - id: model-manager
-      name: 'dsh-model-manager'
+      name: 'dsh-import-models'
 ```
 
 Refresh the Web GUI once, then open **Settings → Model Manager**.

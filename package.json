@@ -1,9 +1,9 @@
 {
-  "name": "dsh-model-manager",
+  "name": "dsh-import-models",
   "version": "0.1.0",
   "description": "Import the models, providers, API keys and OAuth logins that other agent harnesses keep on this machine (opencode, Codex/ChatGPT, Claude Code, Gemini, Qwen, .env) into DeepSeek Harness, and manage them from a clean Settings page.",
   "type": "module",
-  "private": true,
+  "private": false,
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
@@ -34,7 +34,8 @@
     "opencode",
     "codex",
     "oauth",
-    "llm-providers"
+    "llm-providers",
+    "models"
   ],
   "dsh": {
     "manifestVersion": 1,
@@ -53,5 +54,12 @@
   "license": "MIT",
   "scripts": {
     "test": "node --test test/smoke.mjs"
+  },
+  "homepage": "https://github.com/vit-cerny/dsh-model-manager#readme",
+  "bugs": {
+    "url": "https://github.com/vit-cerny/dsh-model-manager/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

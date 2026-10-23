@@ -4,7 +4,7 @@
  * DSH then serves. Secrets only ever appear as the redacted hints the Host sends.
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-model-manager',
+  id: 'dsh-import-models',
   factory: (require) => {
     const exports = {}
     const React = require('react')
