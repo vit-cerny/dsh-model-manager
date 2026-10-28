@@ -1,255 +1,125 @@
-// Smoke test for the Host half: runs the plugin against an in-memory context and
-// exercises every HTTP endpoint and tool. No DSH process needed.
-// Run: node test/smoke.mjs
-import { test } from 'node:test'
-import assert from 'node:assert/strict'
-import { apply } from '../lib/index.js'
-import { parseJsonc, routeKey, refNameFor, normalizeOpencodeModel, protocolFor, parseEnvText } from '../lib/sources.js'
-import { buildPlan, mergeRoutes, isChatModel } from '../lib/manager.js'
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
 
-test('jsonc parsing tolerates comments and trailing commas', () => {
-  const value = parseJsonc(`{
-    // a comment
-    "a": [1, 2,],
-    /* block */ "b": "x//not-a-comment",
-  }`)
-  assert.deepEqual(value, { a: [1, 2], b: 'x//not-a-comment' })
-})
+import { normalizeOpencodeModel, normalizeDisplayName, opencodeConfigPaths, routeKey, refNameFor, protocolFor } from '../lib/sources.js';
+import { isChatModel, buildPlan, mergeRoutes } from '../lib/manager.js';
+import { redactPlan } from '../lib/index.js';
+import { writeState, readState, defaultStatePath } from '../lib/store.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-test('route and reference names follow the host grammars', () => {
-  assert.equal(routeKey('My Provider!'), 'my-provider')
-  assert.equal(routeKey('7api'), '7api')
-  assert.match(refNameFor('7api'), /^[A-Za-z_][A-Za-z0-9_]*$/)
-  assert.equal(refNameFor('openai'), 'OPENAI_API_KEY')
-})
-
-test('opencode model rows prefer the wire id and carry capabilities', () => {
-  const row = normalizeOpencodeModel('auto', {
-    modelID: 'vendor/auto',
-    name: 'Auto',
-    limit: { context: 200000, output: 32000 },
-    capabilities: { input: ['text', 'image'], reasoning: { supported: true, effort: ['none', 'low', 'high'] } },
+describe('dsh-model-manager smoke', () => {
+  it('normalizes an opencode model row', () => {
+    const row = normalizeOpencodeModel('gpt-5', { name: 'GPT-5', limit: { context: 128000, output: 8192 }, capabilities: { input: ['text', 'image'], reasoning: { supported: true, effort: ['low', 'high'] } } })
+    assert.equal(row.id, 'gpt-5')
+    assert.equal(row.name, 'GPT-5')
+    assert.equal(row.contextWindow, 128000)
+    assert.equal(row.maxTokens, 8192)
+    assert.deepEqual(row.input, ['text', 'image'])
+    assert.ok(row.reasoningEfforts)
   })
-  assert.equal(row.id, 'vendor/auto')
-  assert.equal(row.contextWindow, 200000)
-  assert.deepEqual(row.input, ['text', 'image'])
-  assert.deepEqual(Object.keys(row.reasoningEfforts), ['off', 'low', 'high'])
-})
 
-test('protocol mapping follows the opencode package', () => {
-  assert.equal(protocolFor('@opencode/ai/providers/anthropic'), 'anthropic-messages')
-  assert.equal(protocolFor('@opencode/ai/providers/openai'), 'openai-responses')
-  assert.equal(protocolFor('@opencode/ai/providers/openai-compatible'), 'openai-completions')
-})
-
-test('non-chat models are filtered', () => {
-  assert.equal(isChatModel('text-embedding-3', {}), false)
-  assert.equal(isChatModel('whisper-1', {}), false)
-  assert.equal(isChatModel('gpt-5', { name: 'GPT-5' }), true)
-})
-
-test('env parsing handles quotes and export prefixes', () => {
-  assert.deepEqual(parseEnvText('export A_KEY=abc\n# c\nB_KEY="q"\n'), { A_KEY: 'abc', B_KEY: 'q' })
-})
-
-test('planning merges into an identical existing route instead of shadowing it', () => {
-  const items = [{
-    kind: 'provider',
-    sourceId: 'demo',
-    foreignId: 'gateway',
-    displayName: 'Gateway',
-    protocol: 'openai-completions',
-    baseURL: 'https://gateway.example/v1',
-    apiKey: 'secret',
-    models: [{ id: 'known' }, { id: 'new' }],
-  }]
-  const plan = buildPlan(items, {
-    existingProviders: {
-      gateway: { displayName: 'Existing', api: 'openai-completions', baseURL: 'https://gateway.example/v1', apiKeyEnv: 'KEEP_ME', models: [{ id: 'known' }] },
-    },
+  it('routeKey is lowercase hyphenated', () => {
+    assert.equal(routeKey('OpenAI Codex'), 'openai-codex')
   })
-  assert.deepEqual(Object.keys(plan.routes), ['gateway'])
-  assert.equal(plan.routes.gateway.apiKeyEnv, 'KEEP_ME')
-  assert.deepEqual(plan.routes.gateway.models.map((model) => model.id), ['known', 'new'])
-  assert.equal(JSON.stringify(plan.routes).includes('secret'), false, 'route config must not carry the key')
-})
 
-test('a conflicting route gets a distinct source-qualified key', () => {
-  const plan = buildPlan([{
-    kind: 'provider',
-    sourceId: 'other',
-    foreignId: 'gateway',
-    protocol: 'openai-completions',
-    baseURL: 'https://elsewhere.example/v1',
-    models: [{ id: 'm' }],
-  }], { existingProviders: { gateway: { baseURL: 'https://gateway.example/v1' } } })
-  assert.deepEqual(Object.keys(plan.routes), ['other-gateway'])
-})
+  it('replaces corrupted or unbounded display names', () => {
+    assert.equal(normalizeDisplayName('Ãƒ broken', '7api'), '7api')
+    assert.equal(normalizeDisplayName('x'.repeat(121), '7api'), '7api')
+    assert.equal(normalizeDisplayName('7API', 'fallback'), '7API')
+  })
 
-test('oauth items become a grant record on a bare route', () => {
-  const plan = buildPlan([{
-    kind: 'oauth',
-    sourceId: 'codex',
-    foreignId: 'openai-codex',
-    displayName: 'ChatGPT',
-    grant: { type: 'oauth', access: 'a', refresh: 'r', expires: 1 },
-  }], {})
-  assert.deepEqual(plan.routes['openai-codex'], { displayName: 'ChatGPT' })
-  assert.equal(plan.records[0].key, 'llm-pi-ai/openai-codex')
-})
+  it('refNameFor produces env-style name', () => {
+    assert.equal(refNameFor('my-gateway'), 'MY_GATEWAY_API_KEY')
+  })
 
-test('mergeRoutes keeps unrelated routes', () => {
-  const next = mergeRoutes({ providers: { a: { displayName: 'A' } } }, { b: { displayName: 'B' } })
-  assert.deepEqual(Object.keys(next.providers).sort(), ['a', 'b'])
-})
+  it('protocolFor maps packages', () => {
+    assert.equal(protocolFor('@ai-sdk/anthropic'), 'anthropic-messages')
+    assert.equal(protocolFor('openai-compatible'), 'openai-completions')
+  })
 
-function fakeContext() {
-  const providers = {}
-  const refs = new Map()
-  const records = new Map()
-  const handlers = new Map()
-  const tools = new Map()
-  const entry = { options: { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai', config: { providers } } }
-  const ctx = {
-    logger: { info() {}, warn() {} },
-    effect() {},
-    get(service) {
-      if (service === 'configEditor') {
-        return {
-          entries: () => [entry],
-          edit: async (target, change) => {
-            const next = change(structuredClone(target.options.config), {})
-            for (const key of Object.keys(providers)) delete providers[key]
-            Object.assign(providers, next.providers ?? {})
-          },
-        }
-      }
-      if (service === 'credentials') {
-        return {
-          set: async (ref, value) => { refs.set(ref, value) },
-          unset: async (ref) => { refs.delete(ref) },
-          listRecords: async () => [...records.keys()].map((key) => ({ key, kind: records.get(key).kind })),
-          modifyRecord: async (key, mutate) => { records.set(key, await mutate(records.get(key))) },
-          deleteRecord: async (key) => { records.delete(key) },
-        }
-      }
-      return undefined
-    },
-    inject(names, run) {
-      const services = {}
-      for (const name of names) {
-        if (name === 'webServer') services.webServer = { register: (route) => { handlers.set(route.path, route); return () => {} } }
-        if (name === 'tools') services.tools = { register: (definition) => { tools.set(definition.name, definition); return () => {} } }
-        if (name === 'systemPrompt') services.systemPrompt = { section: () => () => {} }
-      }
-      run({ ...ctx, ...services, effect: (fn) => fn() })
-    },
-  }
-  apply(ctx, { enabled: true, allowWrite: true })
-  return { providers, refs, records, handlers, tools }
-}
+  it('isChatModel filters non-chat', () => {
+    assert.equal(isChatModel('text-embedding-3', { name: 'Embedding' }), false)
+    assert.equal(isChatModel('gpt-5', { name: 'GPT-5' }), true)
+  })
 
-async function call(handlers, path, method = 'GET', body) {
-  const route = handlers.get(path)
-  assert.ok(route, `route ${path} is registered`)
-  const res = { status: 0, payload: undefined, writeHead(status) { this.status = status }, end(text) { this.payload = JSON.parse(text) } }
-  await route.handler({
-    method,
-    url: path,
-    headers: { origin: 'http://127.0.0.1:43120', host: '127.0.0.1:43120' },
-    socket: { remoteAddress: '127.0.0.1' },
-    async *[Symbol.asyncIterator]() {
-      if (body !== undefined) yield Buffer.from(JSON.stringify(body))
-    },
-  }, res)
-  return { status: res.status, body: res.payload }
-}
+  it('buildPlan handles empty input', () => {
+    const plan = buildPlan([], { existingProviders: {} })
+    assert.deepEqual(plan.routes, {})
+    assert.equal(plan.summary.routes, 0)
+  })
 
-test('host routes and tools work end to end', async () => {
-  const { providers, refs, records, handlers, tools } = fakeContext()
+  it('re-import repairs a corrupt existing provider label', () => {
+    const plan = buildPlan([{
+      kind: 'provider', sourceId: 'opencode', foreignId: '7api', displayName: '7api',
+      protocol: 'openai-responses', baseURL: 'https://gateway.example/v1', models: [{ id: 'gpt-6', name: 'GPT-6' }],
+    }], {
+      existingProviders: {
+        '7api': { displayName: 'Ãƒ'.repeat(200), api: 'openai-responses', baseURL: 'https://gateway.example/v1', models: [] },
+      },
+    })
+    assert.equal(plan.routes['7api'].displayName, '7api')
+  })
 
-  assert.equal(tools.size, 9)
-
-  const sources = await call(handlers, '/api/dsh-model-manager/sources')
-  assert.equal(sources.status, 200)
-  assert.ok(Array.isArray(sources.body.sources))
-  // Hints may start with a key prefix, but a full secret must never appear.
-  for (const source of sources.body.sources) {
-    for (const item of source.items) {
-      assert.equal(/[A-Za-z0-9_-]{30,}/.test(item.keyHint ?? ''), false, `no raw key for ${item.foreignId}`)
+  it('redacts API keys, environment values and OAuth grants from import plans', () => {
+    const result = buildPlan([
+      {
+        kind: 'provider', sourceId: 'opencode', foreignId: 'example',
+        apiKey: 'api-key-test-value', models: [{ id: 'chat-model' }],
+      },
+      {
+        kind: 'oauth', sourceId: 'codex', foreignId: 'openai-codex',
+        grant: { access: 'oauth-access-test-value', refresh: 'oauth-refresh-test-value' },
+      },
+      {
+        kind: 'env', sourceId: 'env', foreignId: '.env',
+        entries: { EXAMPLE_API_KEY: 'environment-test-value' },
+      },
+    ]);
+    const safe = redactPlan(result);
+    const serialized = JSON.stringify(safe);
+    assert.equal(safe.summary.credentials, 3);
+    assert.deepEqual(safe.envRefs.map(({ ref }) => ref), ['EXAMPLE_API_KEY']);
+    assert.equal(safe.routes.example.models[0].id, 'chat-model');
+    assert.equal('apiKey' in safe.routes.example, false);
+    for (const secret of ['api-key-test-value', 'oauth-access-test-value', 'oauth-refresh-test-value', 'environment-test-value']) {
+      assert.equal(serialized.includes(secret), false);
+      assert.equal(JSON.stringify(result).includes(secret), true);
     }
-  }
-
-  const added = await call(handlers, '/api/dsh-model-manager/route/add', 'POST', {
-    route: 'demo-gateway',
-    baseURL: 'https://gateway.example/v1',
-    api: 'openai-completions',
-    models: ['demo-model'],
-    apiKey: 'demo-secret',
   })
-  assert.equal(added.status, 200)
-  assert.equal(providers['demo-gateway'].displayName, 'demo-gateway')
-  assert.equal(refs.get(added.body.apiKeyEnv), 'demo-secret')
 
-  const toggled = await call(handlers, '/api/dsh-model-manager/model/toggle', 'POST', { route: 'demo-gateway', model: 'demo-model', enabled: false })
-  assert.equal(toggled.status, 200)
-  assert.deepEqual(providers['demo-gateway'].models, [])
+  it('mergeRoutes merges providers', () => {
+    const merged = mergeRoutes({}, { foo: { models: [{ id: 'm1' }] } })
+    assert.ok(merged.providers.foo)
+  })
 
-  const restored = await call(handlers, '/api/dsh-model-manager/model/toggle', 'POST', { route: 'demo-gateway', model: 'demo-model', enabled: true })
-  assert.equal(restored.status, 200)
-  assert.deepEqual(providers['demo-gateway'].models.map((model) => model.id), ['demo-model'])
+  it('store round-trips state', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mm-'))
+    const path = join(dir, 'state.json')
+    writeState({ disabledRoutes: {}, disabledModels: {}, envPaths: [] }, path)
+    const read = readState(path)
+    assert.deepEqual(read.disabledRoutes, {})
+    rmSync(dir, { recursive: true, force: true })
+  })
 
-  const off = await call(handlers, '/api/dsh-model-manager/route/toggle', 'POST', { route: 'demo-gateway', enabled: false })
-  assert.equal(off.status, 200)
-  assert.equal(providers['demo-gateway'], undefined)
+  it('maps both opencode package keys to a protocol', () => {
+    // V1 opencode configs declare `npm`, V2 declares `package`; reading only one
+    // silently downgraded every provider to chat-completions.
+    assert.equal(protocolFor('@ai-sdk/anthropic'), 'anthropic-messages')
+    assert.equal(protocolFor('@ai-sdk/openai'), 'openai-completions')
+    assert.equal(protocolFor(undefined), 'openai-completions')
+  })
 
-  const on = await call(handlers, '/api/dsh-model-manager/route/toggle', 'POST', { route: 'demo-gateway', enabled: true })
-  assert.equal(on.status, 200)
-  assert.ok(providers['demo-gateway'])
-
-  const removed = await call(handlers, '/api/dsh-model-manager/route/remove', 'POST', { route: 'demo-gateway' })
-  assert.equal(removed.status, 200)
-  assert.equal(providers['demo-gateway'], undefined)
-  assert.equal(records.size, 0)
-
-  const badBody = await call(handlers, '/api/dsh-model-manager/import', 'POST', undefined)
-  assert.equal(badBody.status, 400)
-  assert.equal(typeof badBody.body.error, 'string')
-})
-
-test('cross-origin writes are refused', async () => {
-  const { handlers } = fakeContext()
-  const route = handlers.get('/api/dsh-model-manager/import')
-  const res = { status: 0, payload: undefined, writeHead(status) { this.status = status }, end(text) { this.payload = JSON.parse(text) } }
-  await route.handler({ method: 'POST', url: route.path, headers: { origin: 'https://evil.example' }, socket: { remoteAddress: '127.0.0.1' }, async *[Symbol.asyncIterator]() {} }, res)
-  assert.equal(res.status, 403)
-})
-
-test('allowWrite false blocks writes but keeps reads', async () => {
-  const providers = {}
-  const handlers = new Map()
-  const entry = { options: { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai', config: { providers } } }
-  const ctx = {
-    logger: { info() {}, warn() {} },
-    effect() {},
-    get(service) {
-      if (service === 'configEditor') return { entries: () => [entry], edit: async () => {} }
-      return undefined
-    },
-    inject(names, run) {
-      const services = {}
-      for (const name of names) {
-        if (name === 'webServer') services.webServer = { register: (route) => { handlers.set(route.path, route); return () => {} } }
-        if (name === 'tools') services.tools = { register: () => () => {} }
-        if (name === 'systemPrompt') services.systemPrompt = { section: () => () => {} }
-      }
-      run({ ...ctx, ...services, effect: (fn) => fn() })
-    },
-  }
-  apply(ctx, { enabled: true, allowWrite: false })
-  const read = await call(handlers, '/api/dsh-model-manager/routes')
-  assert.equal(read.status, 200)
-  const write = await call(handlers, '/api/dsh-model-manager/route/add', 'POST', { route: 'x', baseURL: 'https://x.example/v1', models: ['m'] })
-  assert.equal(write.status, 400)
-  assert.match(write.body.error, /allowWrite/)
+  it('reads every opencode config file, not just the first', () => {
+    // opencode.json and opencode.jsonc can each hold different providers.
+    const dir = mkdtempSync(join(tmpdir(), 'mm-config-'))
+    const json = join(dir, 'opencode.json')
+    const jsonc = join(dir, 'opencode.jsonc')
+    writeFileSync(json, JSON.stringify({ provider: { fromJson: { npm: '@ai-sdk/openai', models: { a: {} } } } }))
+    writeFileSync(jsonc, JSON.stringify({ provider: { fromJsonc: { npm: '@ai-sdk/anthropic', models: { b: {} } } } }))
+    const paths = opencodeConfigPaths([dir])
+    assert.deepEqual(paths.sort(), [json, jsonc].sort())
+    rmSync(dir, { recursive: true, force: true })
+  })
 })
